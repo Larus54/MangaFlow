@@ -81,7 +81,7 @@ pyinstaller --noconfirm --clean --name "Manga Scraper" --windowed --add-data "as
 
 ## 🔮 Sviluppi Futuri (Roadmap)
 
-Siamo costantemente al lavoro per migliorare Manga Scraper. Ecco cosa arriverà presto:
+ Ecco cosa arriverà presto nei prossimi aggiornamenti:
 
 *   [ ] **Performance e Ottimizzazione (Windows)**: Migliorare l'ottimizzazione e le performance dell'app, non ancora ottimali per Windows
 *   [ ] **Nuovi Provider**: Aggiunta di supporto per altri siti (es. Mangadex, ecc.).
@@ -89,8 +89,19 @@ Siamo costantemente al lavoro per migliorare Manga Scraper. Ecco cosa arriverà 
 *   [ ] **Sync Cloud**: Integrazione con MyAnimeList/Anilist per sincronizzare i progressi.
 *   [ ] **Impostazioni Avanzate**: Temi personalizzabili e gestione cartelle di download.
 *   [ ] **Sezione Anime**: Implementare oltre ad una sezione manga, anche una sezione anime, con interfaccia dedicata e videoplayer integrato. Con le stesse funzionalità della sezione manga.
+
+---
+## 📜 Changelog
+
+### v1.0.0 (12/01/2026) 🎉
+*   **Primo Rilascio Pubblico**: L'applicazione è ora stabile e disponibile per Windows e macOS.
+*   **Provider**: Supporto completo per *MangaWorld*.
+*   **Download**: Aggiunta conversione automatica in EPUB (ottimizzato Kindle) e PDF.
+*   **UI/UX**: Interfaccia grafica completa con modalità scura/chiara automatica, zoom reader e navigazione fluida.
+*   **Sistema**: Implementata gestione cache locale e salvataggio automatico dei preferiti.
+
 ---
 
 Versione app: 1.0.0 (12/01/2026)
 
-Versione README: 0.1 (12/01/2026)
+Versione README: 0.2 (12/01/2026)
