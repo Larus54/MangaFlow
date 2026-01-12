@@ -1,6 +1,6 @@
-# Manga Scraper
+# MangaFlow
 
-**Manga Scraper** è un'applicazione desktop moderna e veloce per cercare, leggere e scaricare manga dai tuoi siti preferiti (attualmente integrato **MangaWorld**).  
+**MangaFlow** è un'applicazione desktop moderna e veloce per cercare, leggere e scaricare manga dai tuoi siti preferiti (attualmente integrato **MangaWorld**).  
 L'interfaccia grafica è realizzata in Python utilizzando `CustomTkinter` per un look pulito e responsivo.
 
 Disponibile sia per Windows che per MacOS.
@@ -92,4 +92,5 @@ Siamo costantemente al lavoro per migliorare Manga Scraper. Ecco cosa arriverà 
 ---
 
 Versione app: 1.0.0 (12/01/2026)
+
 Versione README: 0.1 (12/01/2026)
