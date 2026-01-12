@@ -1,0 +1,7 @@
+customtkinter
+requests
+beautifulsoup4
+lxml
+Pillow
+EbookLib
+pyinstaller
