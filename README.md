@@ -28,8 +28,8 @@ Se vuoi modificare il codice o eseguire l'applicazione tramite Python, segui que
 
 1.  **Clona la repository** (o scarica lo zip):
     ```bash
-    git clone https://github.com/tuo-username/manga-scraper.git
-    cd manga-scraper
+    git clone https://github.com/Larus54/MangaFlow.git
+    cd MangaFlow
     ```
 
 2.  **Crea un ambiente virtuale** (raccomandato):
