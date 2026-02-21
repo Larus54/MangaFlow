@@ -3,6 +3,7 @@ import threading
 import requests
 import os
 import shutil
+import html
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from io import BytesIO
@@ -23,7 +24,63 @@ from ebooklib import epub
 MAX_WIDTH = 1264
 MAX_HEIGHT = 1680
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.2"
+
+
+def group_chapters_by_volume(chapters):
+    """Group chapter dicts by volume while preserving original order.
+
+    Returns a list like:
+    [
+      {"volume": "Volume 01", "chapters": [..]},
+      ...
+    ]
+    If no volume info is present, returns an empty list.
+    """
+    groups = []
+    index_by_volume = {}
+
+    for chap in chapters or []:
+        volume_name = (chap.get("volume") or "").strip()
+        if not volume_name:
+            continue
+
+        if volume_name not in index_by_volume:
+            index_by_volume[volume_name] = len(groups)
+            groups.append({"volume": volume_name, "chapters": []})
+
+        groups[index_by_volume[volume_name]]["chapters"].append(chap)
+
+    return groups
+
+
+def format_chapter_title(chapter, include_volume=False):
+    """Return a chapter title, optionally prefixed with volume name."""
+    if not isinstance(chapter, dict):
+        return ""
+
+    base_title = (chapter.get("title") or "").strip()
+    if not include_volume:
+        return base_title
+
+    volume_name = (chapter.get("volume") or "").strip()
+    if not volume_name:
+        return base_title
+
+    if base_title.lower().startswith(volume_name.lower()):
+        return base_title
+
+    return f"{volume_name} • {base_title}"
+
+
+def safe_filename_part(value: str) -> str:
+    """Make a string safe to use as part of a filename."""
+    text = (value or "").strip()
+    if not text:
+        return "Senza_Volume"
+    for ch in ('/', '\\\\', ':', '*', '?', '"', '<', '>', '|'):
+        text = text.replace(ch, '_')
+    return text
 
 
 def bring_to_front(win):
@@ -258,6 +315,31 @@ class MangaWorld:
         src = element.get('src')
         return urljoin(page_url, src)
 
+    def _extract_volume_cover_url(self, volume_el):
+        """Extract volume cover URL from MangaWorld volume block (if present)."""
+        try:
+            icon = volume_el.select_one('i[data-volume-image]')
+            if not icon:
+                return None
+
+            raw = icon.get('data-volume-image') or ''
+            if not raw:
+                return None
+
+            # data-volume-image contains escaped HTML like: <img src=... class="..." />
+            fragment_html = html.unescape(raw)
+            fragment = BeautifulSoup(fragment_html, "lxml")
+            img = fragment.select_one('img')
+            if not img:
+                return None
+
+            src = (img.get('src') or '').strip()
+            if not src:
+                return None
+            return urljoin(self.url, src)
+        except Exception:
+            return None
+
     def search_manga(self, keyword):
         """Search for manga by keyword and return list of dicts with id and title."""
         uri = f"{self.url}/archive?keyword={keyword}"
@@ -278,9 +360,32 @@ class MangaWorld:
         uri = urljoin(self.url, manga["id"])
         mid = manga.get('id')
         if mid in self._chapters_cache:
-            return self._chapters_cache[mid]
-        # Selettore capitoli
-        elements, soup = self.fetchDOM(uri, 'div.chapters-wrapper div.chapter a.chap')
+            cached = self._chapters_cache[mid]
+            try:
+                cached_chapters = cached[0] if isinstance(cached, tuple) and len(cached) > 0 else []
+                # Legacy cache compatibility:
+                # old cache entries may not include the "volume" key.
+                # In that case, force a refresh from network to rebuild chapters with volume info.
+                if cached_chapters:
+                    first = cached_chapters[0]
+                    if isinstance(first, dict) and ('volume' in first):
+                        # If volume covers are missing, refresh to populate them.
+                        try:
+                            needs_cover_refresh = any(
+                                (ch.get('volume') and not ch.get('volume_cover'))
+                                for ch in cached_chapters if isinstance(ch, dict)
+                            )
+                        except Exception:
+                            needs_cover_refresh = False
+
+                        if not needs_cover_refresh:
+                            return cached
+                else:
+                    return cached
+            except Exception:
+                pass
+        # Carichiamo la pagina una sola volta e poi estraiamo capitoli/volumi dal DOM
+        _unused, soup = self.fetchDOM(uri, 'div.chapters-wrapper')
 
         # Ricavo della copertina
         cover_img = soup.select_one('div.comic-info img')
@@ -313,11 +418,33 @@ class MangaWorld:
         genre_tags = soup.select('div.meta-data a[href*="genre="]')
         genres_list = [g.text.strip() for g in genre_tags]
 
-        chapters = [
-            {"id": self.getRootRelativeOrAbsoluteLink(el, self.url),
-             "title": el.select_one('span').text.strip() if el.select_one('span') else el.text.strip()}
-            for el in elements
-        ]
+        chapters = []
+        volume_elements = soup.select('div.chapters-wrapper div.volume-element')
+
+        # Se il manga è organizzato per volumi, manteniamo il riferimento volume per ogni capitolo.
+        if volume_elements:
+            for volume_el in volume_elements:
+                volume_name_el = volume_el.select_one('p.volume-name')
+                volume_name = volume_name_el.get_text(" ", strip=True) if volume_name_el else ""
+                volume_cover = self._extract_volume_cover_url(volume_el)
+
+                for el in volume_el.select('div.chapter a.chap'):
+                    chapters.append({
+                        "id": self.getRootRelativeOrAbsoluteLink(el, self.url),
+                        "title": el.select_one('span').text.strip() if el.select_one('span') else el.text.strip(),
+                        "volume": volume_name,
+                        "volume_cover": volume_cover
+                    })
+        else:
+            # Fallback classico: nessuna separazione per volumi
+            elements = soup.select('div.chapters-wrapper div.chapter a.chap')
+            chapters = [
+                {"id": self.getRootRelativeOrAbsoluteLink(el, self.url),
+                 "title": el.select_one('span').text.strip() if el.select_one('span') else el.text.strip(),
+                 "volume": "",
+                 "volume_cover": None}
+                for el in elements
+            ]
         # Invertiamo per avere l'ordine cronologico (di solito gli elementi vengono dal più recente al più vecchio)
         # Assicuriamoci che la lista sia cronologica (vecchio -> nuovo) in modo che 'next' aumenti l'indice
         try:
@@ -339,6 +466,34 @@ class MangaWorld:
         except Exception:
             pass
         return result
+
+    def get_volume_covers(self, manga):
+        """Return distinct volume covers for a manga.
+
+        Output format:
+        [
+          {"volume": "Volume 01", "cover_url": "https://..."},
+          ...
+        ]
+        """
+        try:
+            chapters, *_ = self.get_chapters(manga)
+        except Exception:
+            return []
+
+        seen = set()
+        output = []
+        for ch in chapters or []:
+            volume_name = (ch.get('volume') or '').strip()
+            cover_url = ch.get('volume_cover')
+            if not volume_name or not cover_url:
+                continue
+            key = (volume_name, cover_url)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append({"volume": volume_name, "cover_url": cover_url})
+        return output
         
     def get_pages(self, chapter):
         """Fetch image URLs for all pages in a chapter."""
@@ -379,13 +534,14 @@ class MangaReader(ctk.CTkToplevel):
         # include manga title in window title if available
         try:
             manga_name = getattr(parent, 'current_manga_title', '') or ''
+            chapter_display = format_chapter_title(chapter_data)
             if manga_name:
-                self.title(f"{manga_name} - {chapter_data.get('title','')}")
+                self.title(f"{manga_name} - {chapter_display}")
             else:
-                self.title(f"Lettura: {chapter_data.get('title','')}")
+                self.title(f"Lettura: {chapter_display}")
         except Exception:
             try:
-                self.title(f"Lettura: {chapter_data.get('title','')}")
+                self.title(f"Lettura: {format_chapter_title(chapter_data)}")
             except Exception:
                 pass
         
@@ -464,7 +620,7 @@ class MangaReader(ctk.CTkToplevel):
             mg_text = ''
         self.lbl_manga_title = ctk.CTkLabel(title_stack, text=mg_text, font=("Inter", 10, "bold"), text_color=COLOR_TEXT_LIGHT)
         self.lbl_manga_title.pack(anchor='w')
-        self.lbl_title_small = ctk.CTkLabel(title_stack, text=chapter_data.get('title',''), font=("Inter", 14, "bold"), text_color=COLOR_TEXT)
+        self.lbl_title_small = ctk.CTkLabel(title_stack, text=format_chapter_title(chapter_data), font=("Inter", 14, "bold"), text_color=COLOR_TEXT)
         self.lbl_title_small.pack(anchor='w')
 
         # Right actions (chapter selector, settings, fullscreen)
@@ -477,7 +633,8 @@ class MangaReader(ctk.CTkToplevel):
             try:
                 chapters = self.master.current_chapters_data if hasattr(self.master, 'current_chapters_data') else []
                 for i, ch in enumerate(chapters):
-                    label = f"#{i+1} - {ch.get('title','')[:60]}"
+                    chapter_label = format_chapter_title(ch)
+                    label = f"#{i+1} - {chapter_label[:60]}"
                     values.append(label)
                     self._chapter_map[label] = ch
             except Exception:
@@ -992,9 +1149,11 @@ class ChapterSelector(ctk.CTkToplevel):
         """Create buttons for each chapter in the scrollable list."""
         # Pulisce vecchi widget
         for w in self.scroll.winfo_children(): w.destroy()
-        
+
+        grouped = group_chapters_by_volume(data)
+
         # Crea bottoni per tutti i capitoli (se necessario si può reintrodurre un limite)
-        for chap in data:
+        def make_chapter_button(chap):
             # show per-chapter progress in this selector without touching sidebar
             val = self.progress_map.get(chap.get('id'), 0)
             # support either stored int percent or dict {percent,page}
@@ -1005,7 +1164,7 @@ class ChapterSelector(ctk.CTkToplevel):
                     pct = int(val)
                 except Exception:
                     pct = 0
-            title = chap['title']
+            title = format_chapter_title(chap)
             if pct:
                 title = f"{title} ({pct}%)"
             fg = "transparent"
@@ -1026,6 +1185,21 @@ class ChapterSelector(ctk.CTkToplevel):
                 command=lambda c=chap: self.select_chapter(c)
             )
             btn.pack(fill="x", pady=2)
+
+        if grouped:
+            for group in grouped:
+                ctk.CTkLabel(
+                    self.scroll,
+                    text=group.get('volume', ''),
+                    font=("Inter", 11, "bold"),
+                    text_color=COLOR_TEXT_LIGHT,
+                    anchor="w"
+                ).pack(fill="x", pady=(10, 3), padx=4)
+                for chap in group.get('chapters', []):
+                    make_chapter_button(chap)
+        else:
+            for chap in data:
+                make_chapter_button(chap)
             
 
     def filter_list(self, *args):
@@ -1052,19 +1226,43 @@ class ChapterDownloadSelector(ctk.CTkToplevel):
         self.on_confirm = on_confirm_callback
 
         self.vars = []
+        self._volume_vars = []
+        self._volume_groups = group_chapters_by_volume(self.chapters)
+        self._mode = "chapters"
 
         lbl = ctk.CTkLabel(self, text="Seleziona i capitoli da includere nel download", font=("Inter", 12, "bold"))
         lbl.pack(anchor="w", padx=10, pady=(10,5))
 
+        mode_row = ctk.CTkFrame(self, fg_color="transparent")
+        mode_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.btn_mode_chapters = ctk.CTkButton(
+            mode_row,
+            text="Capitoli",
+            height=32,
+            fg_color=COLOR_PRIMARY,
+            text_color="white",
+            command=lambda: self._set_mode("chapters")
+        )
+        self.btn_mode_chapters.pack(side="left", padx=(0, 6))
+
+        self.btn_mode_volumes = ctk.CTkButton(
+            mode_row,
+            text="Volumi",
+            height=32,
+            fg_color=COLOR_CARD,
+            text_color=COLOR_TEXT,
+            border_width=1,
+            border_color="#E5E7EB",
+            hover_color="#F3F4F6",
+            command=lambda: self._set_mode("volumes")
+        )
+        self.btn_mode_volumes.pack(side="left")
+
         self.scroll = ctk.CTkScrollableFrame(self)
         self.scroll.pack(fill="both", expand=True, padx=10, pady=(0,10))
 
-        for ch in self.chapters:
-            v = ctk.BooleanVar(value=False)
-            self.vars.append((v, ch))
-            # customtkinter.CTkCheckBox does not accept 'anchor' kwarg; use pack options instead
-            chk = ctk.CTkCheckBox(self.scroll, text=ch.get('title', ''), variable=v)
-            chk.pack(fill='x', pady=2, padx=5)
+        self._render_list()
 
         ctrl = ctk.CTkFrame(self, fg_color="transparent")
         ctrl.pack(fill='x', padx=10, pady=10)
@@ -1090,12 +1288,79 @@ class ChapterDownloadSelector(ctk.CTkToplevel):
         except Exception:
             pass
 
-        selected = [ch for (v, ch) in self.vars if v.get()]
+        if self._mode == "volumes":
+            selected = []
+            for v, volume_name in self._volume_vars:
+                if not v.get():
+                    continue
+                for group in self._volume_groups:
+                    if group.get('volume') == volume_name:
+                        selected.extend(group.get('chapters', []))
+                        break
+        else:
+            selected = [ch for (v, ch) in self.vars if v.get()]
         try:
             self.on_confirm(selected)
         except Exception:
             pass
         self.destroy()
+
+    def _set_mode(self, mode):
+        if mode not in ("chapters", "volumes"):
+            return
+        self._mode = mode
+        try:
+            if mode == "chapters":
+                self.btn_mode_chapters.configure(fg_color=COLOR_PRIMARY, text_color="white")
+                self.btn_mode_volumes.configure(fg_color=COLOR_CARD, text_color=COLOR_TEXT, border_width=1, border_color="#E5E7EB")
+            else:
+                self.btn_mode_volumes.configure(fg_color=COLOR_PRIMARY, text_color="white", border_width=0)
+                self.btn_mode_chapters.configure(fg_color=COLOR_CARD, text_color=COLOR_TEXT, border_width=1, border_color="#E5E7EB")
+        except Exception:
+            pass
+        self._render_list()
+
+    def _render_list(self):
+        for w in self.scroll.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self.vars = []
+        self._volume_vars = []
+
+        if self._mode == "volumes":
+            if not self._volume_groups:
+                ctk.CTkLabel(self.scroll, text="Nessun volume disponibile", text_color=COLOR_TEXT_LIGHT).pack(anchor="w", padx=5, pady=5)
+                return
+            for group in self._volume_groups:
+                volume_name = group.get('volume', '')
+                v = ctk.BooleanVar(value=False)
+                self._volume_vars.append((v, volume_name))
+                chk = ctk.CTkCheckBox(self.scroll, text=volume_name, variable=v)
+                chk.pack(fill='x', pady=4, padx=5)
+        else:
+            if self._volume_groups:
+                for group in self._volume_groups:
+                    ctk.CTkLabel(
+                        self.scroll,
+                        text=group.get('volume', ''),
+                        font=("Inter", 11, "bold"),
+                        text_color=COLOR_TEXT_LIGHT,
+                        anchor="w"
+                    ).pack(fill="x", pady=(10, 3), padx=4)
+
+                    for ch in group.get('chapters', []):
+                        v = ctk.BooleanVar(value=False)
+                        self.vars.append((v, ch))
+                        chk = ctk.CTkCheckBox(self.scroll, text=format_chapter_title(ch), variable=v)
+                        chk.pack(fill='x', pady=2, padx=5)
+            else:
+                for ch in self.chapters:
+                    v = ctk.BooleanVar(value=False)
+                    self.vars.append((v, ch))
+                    chk = ctk.CTkCheckBox(self.scroll, text=format_chapter_title(ch), variable=v)
+                    chk.pack(fill='x', pady=2, padx=5)
 # =========================
 # GUI LOGIC
 # =========================
@@ -1742,9 +2007,19 @@ class MangaWorldGUI(ctk.CTk):
         # Usiamo self.current_chapters_data per conservare i dati grezzi per il lettore
         self.current_chapters_data = chapters 
 
+        grouped = group_chapters_by_volume(chapters)
+        display_rows = []
+        if grouped:
+            for group in grouped:
+                display_rows.append({"type": "header", "label": group.get('volume', '')})
+                for ch in group.get('chapters', []):
+                    display_rows.append({"type": "chapter", "data": ch})
+        else:
+            display_rows = [{"type": "chapter", "data": ch} for ch in chapters]
+
         # Create widgets in small batches to keep UI responsive
         batch_size = 20
-        total = len(chapters)
+        total = len(display_rows)
         self.chapter_widgets = []
 
         def make_batch(start):
@@ -1753,7 +2028,20 @@ class MangaWorldGUI(ctk.CTk):
                 return
 
             end = min(start + batch_size, total)
-            for chap in chapters[start:end]:
+            for row in display_rows[start:end]:
+                if row.get("type") == "header":
+                    ctk.CTkLabel(
+                        self.chapters_scroll,
+                        text=row.get("label", ""),
+                        font=("Inter", 11, "bold"),
+                        text_color=COLOR_TEXT_LIGHT,
+                        anchor="w"
+                    ).pack(anchor="w", fill="x", pady=(8, 2), padx=5)
+                    continue
+
+                chap = row.get("data")
+                if not chap:
+                    continue
                 var = ctk.BooleanVar()
                 # Only mark as read if it's in read_list (fully read). Partial progress is shown in the reader popup only.
                 if chap['id'] in read_list:
@@ -1765,7 +2053,7 @@ class MangaWorldGUI(ctk.CTk):
 
                 chk = ctk.CTkCheckBox(
                     self.chapters_scroll,
-                    text=chap['title'],
+                    text=format_chapter_title(chap),
                     variable=var,
                     text_color=COLOR_TEXT,
                     font=("Inter", 12),
@@ -2024,6 +2312,17 @@ class MangaWorldGUI(ctk.CTk):
                 fg_color=COLOR_PRIMARY, font=("Inter", 13))
         self.chk_split_mb.pack(anchor="w", pady=(0, 14))
 
+        self.split_by_volume_var = ctk.BooleanVar(value=False)
+        self.chk_split_by_volume = ctk.CTkCheckBox(
+            inner_options,
+            text="Separa file finali per volume (quando unisci capitoli)",
+            variable=self.split_by_volume_var,
+            text_color=COLOR_TEXT,
+            fg_color=COLOR_PRIMARY,
+            font=("Inter", 13)
+        )
+        self.chk_split_by_volume.pack(anchor="w", pady=(0, 14))
+
         # Pulsanti Azione
         action_btns = ctk.CTkFrame(inner_options, fg_color="transparent")
         action_btns.pack(fill="x")
@@ -2034,6 +2333,7 @@ class MangaWorldGUI(ctk.CTk):
         self.btn_pdf = ctk.CTkButton(action_btns, text="Scarica PDF", font=("Inter", 14, "bold"), fg_color="white", text_color=COLOR_TEXT, border_width=1, border_color="#E5E7EB", hover_color="#F3F4F6", height=45, command=lambda: self.start_download_thread('pdf'))
         self.btn_pdf.pack(side="left", fill="x", expand=True)
 
+
         # Keep download options always present to avoid layout jumps; disable until a manga is selected
         try:
             self.btn_epub.configure(state="disabled")
@@ -2043,6 +2343,7 @@ class MangaWorldGUI(ctk.CTk):
         try:
             self.chk_merge_epub.configure(state="disabled")
             self.chk_split_mb.configure(state="disabled")
+            self.chk_split_by_volume.configure(state="disabled")
         except Exception:
             pass
 
@@ -2439,6 +2740,10 @@ class MangaWorldGUI(ctk.CTk):
             self.split_mb_var.set(False)
         except Exception:
             pass
+        try:
+            self.split_by_volume_var.set(False)
+        except Exception:
+            pass
         # Favorite button stays packed; just disable/reset it
         try:
             self.btn_fav.configure(state="disabled", text='☆', fg_color='transparent', text_color=COLOR_TEXT)
@@ -2744,6 +3049,8 @@ class MangaWorldGUI(ctk.CTk):
                     self.chk_merge_epub.configure(state="normal")
                 if getattr(self, 'chk_split_mb', None) is not None:
                     self.chk_split_mb.configure(state="normal")
+                if getattr(self, 'chk_split_by_volume', None) is not None:
+                    self.chk_split_by_volume.configure(state="normal")
             except Exception:
                 pass
         else:
@@ -2794,6 +3101,8 @@ class MangaWorldGUI(ctk.CTk):
                     self.chk_merge_epub.configure(state="disabled")
                 if getattr(self, 'chk_split_mb', None) is not None:
                     self.chk_split_mb.configure(state="disabled")
+                if getattr(self, 'chk_split_by_volume', None) is not None:
+                    self.chk_split_by_volume.configure(state="disabled")
             except Exception:
                 pass
 
@@ -2971,8 +3280,8 @@ class MangaWorldGUI(ctk.CTk):
             if not save_path:
                 return
 
-            # Invertiamo l'ordine così che il download vada dal capitolo più vecchio al più recente
-            selected = list(reversed(chapters))
+            # Utilizza l'ordine selezionato (presumibilmente già corretto: 1, 2, 3...)
+            selected = chapters
 
             # Disable download buttons to prevent concurrent runs
             try:
@@ -3019,7 +3328,7 @@ class MangaWorldGUI(ctk.CTk):
 
         try:
             for i, chap in enumerate(chapters):
-                self.set_status(f"Scaricamento capitolo {i+1}/{total}: \n {chap['title']}")
+                self.set_status(f"Scaricamento capitolo {i+1}/{total}: \n {format_chapter_title(chap)}")
                 try:
                     page_urls = self.mw.get_pages(chap)
                     imgs_bytes = []
@@ -3058,10 +3367,16 @@ class MangaWorldGUI(ctk.CTk):
                     imgs_bytes = sorted(imgs_bytes, key=lambda x: x[2])
                     imgs_bytes = [(name, b) for (name, b, _idx) in imgs_bytes]
 
-                    all_chapters.append({'title': chap['title'], 'imgs': imgs_bytes, 'size': chap_size})
+                    all_chapters.append({
+                        'title': format_chapter_title(chap),
+                        'volume': (chap.get('volume') or '').strip(),
+                        'volume_cover': chap.get('volume_cover'),
+                        'imgs': imgs_bytes,
+                        'size': chap_size
+                    })
 
                 except Exception as e:
-                    print(f"Errore capitolo {chap['title']}: {e}")
+                    print(f"Errore capitolo {format_chapter_title(chap)}: {e}")
 
                 # fine capitolo: assicurati che il progresso rifletta il completamento del capitolo
                 try:
@@ -3074,6 +3389,7 @@ class MangaWorldGUI(ctk.CTk):
 
         # Ora abbiamo tutte le immagini per capitolo in memoria (in bytes). Procediamo alla creazione dei file.
         MAX_BYTES = 200 * 1024 * 1024 if self.split_mb_var.get() else None
+        split_by_volume = bool(getattr(self, 'split_by_volume_var', None) and self.split_by_volume_var.get())
 
         # Normalize save_dir for cases where asksaveasfilename returned a file path
         if os.path.isdir(save_dir):
@@ -3084,8 +3400,20 @@ class MangaWorldGUI(ctk.CTk):
 
         if format_type == 'epub':
             if self.merge_epub_var.get():
-                # Scrivi uno o più EPUB uniti (rispettando MAX_BYTES se presente)
-                self._write_merged_epubs(save_dir, all_chapters, max_bytes=MAX_BYTES)
+                # Scrivi EPUB uniti; opzionalmente separati per volume
+                if split_by_volume:
+                    groups = self._group_download_chapters_by_volume(all_chapters)
+                    for volume_name, volume_chapters in groups:
+                        suffix = safe_filename_part(volume_name)
+                        volume_out = os.path.join(out_dir, f"{self.current_manga_title} - {suffix}.epub")
+                        volume_cover_url = None
+                        try:
+                            volume_cover_url = next((c.get('volume_cover') for c in volume_chapters if c.get('volume_cover')), None)
+                        except Exception:
+                            volume_cover_url = None
+                        self._write_merged_epubs(volume_out, volume_chapters, max_bytes=MAX_BYTES, cover_url=volume_cover_url)
+                else:
+                    self._write_merged_epubs(save_dir, all_chapters, max_bytes=MAX_BYTES)
             else:
                 # Scrivi EPUB per capitolo
                 for idx, ch in enumerate(all_chapters, start=1):
@@ -3095,7 +3423,14 @@ class MangaWorldGUI(ctk.CTk):
 
         elif format_type == 'pdf':
             if self.merge_epub_var.get():
-                self._write_merged_pdfs(save_dir, all_chapters, max_bytes=MAX_BYTES)
+                if split_by_volume:
+                    groups = self._group_download_chapters_by_volume(all_chapters)
+                    for volume_name, volume_chapters in groups:
+                        suffix = safe_filename_part(volume_name)
+                        volume_out = os.path.join(out_dir, f"{self.current_manga_title} - {suffix}.pdf")
+                        self._write_merged_pdfs(volume_out, volume_chapters, max_bytes=MAX_BYTES)
+                else:
+                    self._write_merged_pdfs(save_dir, all_chapters, max_bytes=MAX_BYTES)
             else:
                 # PDF per capitolo
                 for idx, ch in enumerate(all_chapters, start=1):
@@ -3119,6 +3454,24 @@ class MangaWorldGUI(ctk.CTk):
                 self.btn_pdf.configure(state="normal")
             except Exception:
                 pass
+
+    def _group_download_chapters_by_volume(self, all_chapters):
+        """Group downloaded chapter payloads by volume preserving source order."""
+        groups = []
+        index_by_volume = {}
+
+        for ch in all_chapters or []:
+            volume_name = (ch.get('volume') or '').strip()
+            if not volume_name:
+                volume_name = "Senza Volume"
+
+            if volume_name not in index_by_volume:
+                index_by_volume[volume_name] = len(groups)
+                groups.append((volume_name, []))
+
+            groups[index_by_volume[volume_name]][1].append(ch)
+
+        return groups
 
     def _write_single_epub(self, out_path, chapter_title, imgs):
         """Write a single chapter to an EPUB file."""
@@ -3152,7 +3505,7 @@ class MangaWorldGUI(ctk.CTk):
 
         epub.write_epub(out_path, book)
 
-    def _write_merged_epubs(self, save_dir, all_chapters, max_bytes=None):
+    def _write_merged_epubs(self, save_dir, all_chapters, max_bytes=None, cover_url=None):
         """Write multiple chapters into one or more EPUB files (splitting by size)."""
         # Normalize save_dir in case user passed a filename instead of a directory
         if os.path.isdir(save_dir):
@@ -3169,9 +3522,10 @@ class MangaWorldGUI(ctk.CTk):
         current_book.set_title(self.current_manga_title)
         current_book.set_language('it')
         current_book.add_author(self.current_author)
-        if self.current_cover_url:
+        selected_cover = cover_url if cover_url else self.current_cover_url
+        if selected_cover:
             try:
-                r = requests.get(self.current_cover_url)
+                r = requests.get(selected_cover)
                 current_book.set_cover('cover.jpg', r.content)
             except: pass
 
@@ -3210,9 +3564,9 @@ class MangaWorldGUI(ctk.CTk):
                 current_book.set_title(self.current_manga_title)
                 current_book.set_language('it')
                 current_book.add_author(self.current_author)
-                if self.current_cover_url:
+                if selected_cover:
                     try:
-                        r = requests.get(self.current_cover_url)
+                        r = requests.get(selected_cover)
                         current_book.set_cover('cover.jpg', r.content)
                     except: pass
                 current_size = 0

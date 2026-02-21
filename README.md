@@ -93,6 +93,15 @@ pyinstaller --noconfirm --clean --name "Manga Scraper" --windowed --add-data "as
 ---
 ## 📜 Changelog
 
+### v1.0.2 (21/02/2026)
+*   **Capitoli**: Raggruppati per volumi quando disponibili (sidebar e popup lettura/download).
+*   **Download**: Selezione nel popup tra modalità **Capitoli** o **Volumi** per scaricare solo ciò che serve.
+*   **Volumi**: Aggiunto supporto alle copertine dei volumi (EPUB per volume usa la cover corretta).
+*   **Download**: Nuova opzione per separare i file finali per volume quando si uniscono i capitoli.
+
+### v1.0.1 (16/02/2026)
+*   **Download**: Corretto l'ordine di salvataggio dei capitoli nei file EPUB/PDF (dal più vecchio al più recente).
+
 ### v1.0.0 (12/01/2026) 🎉
 *   **Primo Rilascio Pubblico**: L'applicazione è ora stabile e disponibile per Windows e macOS.
 *   **Provider**: Supporto completo per *MangaWorld*.
@@ -102,6 +111,6 @@ pyinstaller --noconfirm --clean --name "Manga Scraper" --windowed --add-data "as
 
 ---
 
-Versione app: 1.0.0 (12/01/2026)
+Versione app: 1.0.2 (21/02/2026)
 
-Versione README: 0.2 (12/01/2026)
+Versione README: 0.4 (21/02/2026)
